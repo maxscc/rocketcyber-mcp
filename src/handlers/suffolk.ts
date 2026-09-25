@@ -60,48 +60,142 @@ type Rec = Record<string, any>;
 
 const isPlainObject = (v: unknown): v is Rec => !!v && typeof v === 'object' && !Array.isArray(v);
 
-/**
- * Find the mailbox/user records in whatever shape /office returns:
- *  - an array, or { data: [...] }, or the object's largest array property
- *  - if those records each hold their own array of objects (e.g. per-customer
- *    groups of users), flatten one level and copy the parent's scalar fields
- *    (accountId, accountName, ...) onto each child as parent_<key> unless the
- *    child already has that key.
- */
-export function extractOfficeRecords(raw: unknown): { records: Rec[]; path: string } {
-  let path = '(root)';
-  let list: unknown[] | undefined;
-  if (Array.isArray(raw)) list = raw;
-  else if (isPlainObject(raw)) {
-    let best: string | undefined;
-    for (const [k, v] of Object.entries(raw)) {
-      if (Array.isArray(v) && (!best || v.length > (raw[best] as unknown[]).length)) best = k;
-    }
-    if (best) { list = raw[best] as unknown[]; path = best; }
-  }
-  if (!list) return { records: isPlainObject(raw) ? [raw] : [], path };
+const isIdKey = (k: string) => /^\d+$/.test(k);
 
-  const objs = list.filter(isPlainObject);
-  // Common nested array-of-objects key present on most items?
+/** Numeric-looking IDs become numbers so filters and grouping agree. */
+export function normId(v: unknown): unknown {
+  if (typeof v === 'string' && /^\d+$/.test(v.trim())) return Number(v);
+  return v;
+}
+
+/** Largest array of objects directly inside `o` (not nested deeper). */
+function largestObjArray(o: Rec): [string, Rec[]] | undefined {
+  let best: [string, Rec[]] | undefined;
+  for (const [k, v] of Object.entries(o)) {
+    if (Array.isArray(v) && v.some(isPlainObject) && (!best || v.length > best[1].length)) best = [k, v.filter(isPlainObject)];
+  }
+  return best;
+}
+
+function scalarsOf(o: Rec): Rec {
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v === null || typeof v !== 'object'));
+}
+
+/** Flatten a list whose items each carry their own array of users; copy parent scalars down. */
+function flattenGroups(items: Rec[], path: string): { records: Rec[]; path: string } {
   const counts = new Map<string, number>();
-  for (const o of objs) for (const [k, v] of Object.entries(o)) {
+  for (const o of items) for (const [k, v] of Object.entries(o)) {
     if (Array.isArray(v) && v.some(isPlainObject)) counts.set(k, (counts.get(k) ?? 0) + 1);
   }
   const nested = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-  if (nested && nested[1] >= Math.max(1, objs.length / 2)) {
-    const [key] = nested;
-    const flat: Rec[] = [];
-    for (const parent of objs) {
-      const scalars = Object.fromEntries(Object.entries(parent).filter(([, v]) => v === null || typeof v !== 'object'));
-      for (const child of (parent[key] ?? []).filter(isPlainObject)) {
-        const merged: Rec = { ...child };
-        for (const [k, v] of Object.entries(scalars)) if (!(k in merged)) merged[k] = v;
-        flat.push(merged);
+  if (!nested || nested[1] < Math.max(1, items.length / 2)) return { records: items, path };
+  const [key] = nested;
+  const flat: Rec[] = [];
+  for (const parent of items) {
+    const sc = scalarsOf(parent);
+    for (const child of (parent[key] ?? []).filter(isPlainObject)) {
+      const merged: Rec = { ...child };
+      for (const [k, v] of Object.entries(sc)) if (!(k in merged)) merged[k] = v;
+      flat.push(merged);
+    }
+  }
+  return { records: flat, path: `${path}[].${key}` };
+}
+
+/**
+ * Normalize RocketCyber's `monitoredAccounts`. Handles:
+ *  - an array of users, or of per-account groups holding a users array
+ *  - an object keyed by account ID whose values are a users array, an object
+ *    holding a users array, or a single per-account record
+ *  - an object keyed by something else (e.g. UPN) whose values are users
+ * Account names come from the sibling `accountIdToNameMap` when present.
+ */
+function fromMonitored(ma: unknown, nameMap: Rec, path: string): { records: Rec[]; path: string } {
+  const withName = (r: Rec, id?: unknown): Rec => {
+    const out: Rec = { ...r };
+    if (id !== undefined && out.accountId === undefined) out.accountId = normId(id);
+    const aid = out.accountId ?? out.customerId;
+    if (out.accountName === undefined && aid !== undefined && nameMap[String(aid)] !== undefined) out.accountName = nameMap[String(aid)];
+    return out;
+  };
+  if (Array.isArray(ma)) {
+    const f = flattenGroups(ma.filter(isPlainObject), path);
+    return { records: f.records.map(r => withName(r)), path: f.path };
+  }
+  if (!isPlainObject(ma)) return { records: [], path };
+  const entries = Object.entries(ma);
+  const idKeyed = entries.length > 0 && entries.every(([k]) => isIdKey(k));
+  const out: Rec[] = [];
+  let sub = '';
+  for (const [k, v] of entries) {
+    const id = idKeyed ? k : undefined;
+    if (Array.isArray(v)) {
+      for (const u of v.filter(isPlainObject)) out.push(withName(u, id));
+      sub = '{id}[]';
+    } else if (isPlainObject(v)) {
+      const arr = largestObjArray(v);
+      if (arr) {
+        const sc = scalarsOf(v);
+        for (const u of arr[1]) out.push(withName({ ...sc, ...u }, id));
+        sub = `{id}.${arr[0]}[]`;
+      } else {
+        out.push(withName(idKeyed ? v : { key: k, ...v }, id));
+        sub = idKeyed ? '{id}' : '{key}';
       }
     }
-    return { records: flat, path: `${path}[].${key}` };
   }
-  return { records: objs, path };
+  return { records: out, path: `${path}.${sub}` };
+}
+
+/** Find `monitoredAccounts` at the root, under `data`, or in the first element of either. */
+function locateMonitored(raw: unknown): { ma: unknown; nameMap: Rec; path: string } | undefined {
+  const candidates: [unknown, string][] = [[raw, '']];
+  if (isPlainObject(raw) && raw.data !== undefined) candidates.push([raw.data, 'data']);
+  for (const [c, p] of [...candidates]) if (Array.isArray(c) && isPlainObject(c[0])) candidates.push([c[0], `${p}[0]`]);
+  for (const [c, p] of candidates) {
+    if (isPlainObject(c) && c.monitoredAccounts !== undefined) {
+      const nameMap = isPlainObject(c.accountIdToNameMap) ? c.accountIdToNameMap : {};
+      return { ma: c.monitoredAccounts, nameMap, path: p ? `${p}.monitoredAccounts` : 'monitoredAccounts' };
+    }
+  }
+  return undefined;
+}
+
+/** Small structural description of a value (types, keys, array lengths) for diagnosis. */
+export function describeShape(v: unknown, depth = 3): unknown {
+  if (Array.isArray(v)) return depth > 0 && v.length ? [`array(${v.length})`, describeShape(v[0], depth - 1)] : `array(${v.length})`;
+  if (isPlainObject(v)) {
+    const keys = Object.keys(v);
+    if (depth <= 0) return `object(${keys.length} keys)`;
+    if (keys.length > 8 && keys.every(isIdKey)) return { [`{${keys.length} numeric keys, e.g. ${keys[0]}}`]: describeShape(v[keys[0]], depth - 1) };
+    const out: Rec = {};
+    for (const k of keys.slice(0, 25)) out[k] = describeShape(v[k], depth - 1);
+    if (keys.length > 25) out['…'] = `${keys.length - 25} more keys`;
+    return out;
+  }
+  return v === null ? 'null' : typeof v;
+}
+
+/**
+ * Find the mailbox/user records in the /office response. Prefers
+ * `monitoredAccounts` (RocketCyber's per-user list); otherwise the largest
+ * array of objects at the root / under `data`, flattening per-account groups.
+ */
+export function extractOfficeRecords(raw: unknown): { records: Rec[]; path: string } {
+  const mon = locateMonitored(raw);
+  if (mon) {
+    const r = fromMonitored(mon.ma, mon.nameMap, mon.path);
+    if (r.records.length) return r;
+  }
+  let path = '(root)';
+  let list: Rec[] | undefined;
+  if (Array.isArray(raw)) list = raw.filter(isPlainObject);
+  else if (isPlainObject(raw)) {
+    const best = largestObjArray(raw);
+    if (best) { list = best[1]; path = best[0]; }
+  }
+  if (!list) return { records: [], path: 'none' };
+  return flattenGroups(list, path);
 }
 
 const ACCOUNT_ID_KEYS = ['accountId', 'customerId', 'account_id', 'customer_id'];
@@ -139,10 +233,16 @@ export interface OfficeArgs {
 
 export function shapeOffice(raw: unknown, a: OfficeArgs): { result: Rec; message: string } {
   const { records: all, path } = extractOfficeRecords(raw);
+  if (!all.length) {
+    return {
+      result: { summary: true, totalRecords: 0, recordsPath: path, responseShape: describeShape(raw) },
+      message: 'Office 365: no per-user records found in the API response; responseShape shows its structure.',
+    };
+  }
   let recs = all;
   if (a.accountId !== undefined) {
     const hasAcct = recs.some(r => firstKey(r, ACCOUNT_ID_KEYS) !== undefined);
-    if (hasAcct) recs = recs.filter(r => Number(firstKey(r, ACCOUNT_ID_KEYS)) === Number(a.accountId));
+    if (hasAcct) recs = recs.filter(r => normId(firstKey(r, ACCOUNT_ID_KEYS)) === Number(a.accountId));
   }
   if (a.mfa) {
     recs = recs.filter(r => {
@@ -155,14 +255,14 @@ export function shapeOffice(raw: unknown, a: OfficeArgs): { result: Rec; message
     recs = recs.filter(r => Object.values(r).some(v => typeof v === 'string' && v.toLowerCase().includes(q)));
   }
 
-  const filters = { accountId: a.accountId, mfa: a.mfa, search: a.search };
+  const filters = { accountId: a.accountId === undefined ? undefined : Number(a.accountId), mfa: a.mfa, search: a.search };
   const summary = a.summary ?? (a.search === undefined);
 
   if (summary) {
     const byAccount = new Map<string, { accountId: any; accountName: any; mailboxes: number; mfaEnabled: number; mfaDisabled: number; mfaUnknown: number }>();
     let en = 0, dis = 0, unk = 0;
     for (const r of recs) {
-      const id = firstKey(r, ACCOUNT_ID_KEYS);
+      const id = normId(firstKey(r, ACCOUNT_ID_KEYS));
       const name = firstKey(r, ACCOUNT_NAME_KEYS);
       const key = String(id ?? name ?? '(none)');
       const row = byAccount.get(key) ?? { accountId: id, accountName: name, mailboxes: 0, mfaEnabled: 0, mfaDisabled: 0, mfaUnknown: 0 };
@@ -182,6 +282,7 @@ export function shapeOffice(raw: unknown, a: OfficeArgs): { result: Rec; message
       byAccount: accounts,
       recordFields: fieldNames,
       recordsPath: path,
+      ...(all.length <= 1 ? { responseShape: describeShape(raw) } : {}),
     };
     return {
       result,

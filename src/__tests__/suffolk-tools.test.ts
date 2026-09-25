@@ -122,4 +122,52 @@ describe('Suffolk: get_office', () => {
     const r = await handlerWith({ getOffice }).callTool('rocketcyber_get_office', { raw: true });
     expect(body(r).data).toEqual(raw);
   });
+
+  describe('real /office shape (secureScoreProgress, monitoredAccounts, secureScoreToDo, accountIdToNameMap)', () => {
+    const top = (monitoredAccounts: unknown) => ({
+      secureScoreProgress: { current: 41, max: 80 },
+      secureScoreToDo: { items: 3 },
+      accountIdToNameMap: { '122551': 'Acme Corp', '122552': 'Beta LLC' },
+      monitoredAccounts,
+    });
+
+    it('reads users from monitoredAccounts keyed by account ID (array values)', async () => {
+      const raw = top({
+        '122551': [{ userPrincipalName: 'a@acme.com', mfaEnabled: true }, { userPrincipalName: 'b@acme.com', mfaEnabled: false }],
+        '122552': [{ userPrincipalName: 'c@beta.com', mfaEnabled: false }],
+      });
+      const getOffice = vi.fn().mockResolvedValue(raw);
+      const h = handlerWith({ getOffice });
+      const d = body(await h.callTool('rocketcyber_get_office', {})).data;
+      expect(d.totalRecords).toBe(3);
+      expect(d.recordsPath).toBe('monitoredAccounts.{id}[]');
+      expect(d.byAccount).toEqual([
+        { accountId: 122551, accountName: 'Acme Corp', mailboxes: 2, mfaEnabled: 1, mfaDisabled: 1, mfaUnknown: 0 },
+        { accountId: 122552, accountName: 'Beta LLC', mailboxes: 1, mfaEnabled: 0, mfaDisabled: 1, mfaUnknown: 0 },
+      ]);
+      const f = body(await h.callTool('rocketcyber_get_office', { accountId: 122551, summary: false, mfa: 'disabled' })).data;
+      expect(f.filters.accountId).toBe(122551);
+      expect(f.records).toEqual([{ userPrincipalName: 'b@acme.com', mfaEnabled: false, accountId: 122551, accountName: 'Acme Corp' }]);
+    });
+
+    it('reads users nested one level under each account ID', () => {
+      const { records, path } = extractOfficeRecords(top({
+        '122551': { total: 1, users: [{ upn: 'a@acme.com' }] },
+      }));
+      expect(path).toBe('monitoredAccounts.{id}.users[]');
+      expect(records).toEqual([{ total: 1, upn: 'a@acme.com', accountId: 122551, accountName: 'Acme Corp' }]);
+    });
+
+    it('reads a plain array, filling names from accountIdToNameMap', () => {
+      const { records } = extractOfficeRecords({ data: top([{ accountId: '122552', upn: 'c@beta.com' }]) });
+      expect(records).toEqual([{ accountId: '122552', upn: 'c@beta.com', accountName: 'Beta LLC' }]);
+    });
+
+    it('never counts the whole response as one mailbox; reports the shape instead', async () => {
+      const getOffice = vi.fn().mockResolvedValue(top(12));
+      const r = body(await handlerWith({ getOffice }).callTool('rocketcyber_get_office', {}));
+      expect(r.data.totalRecords).toBe(0);
+      expect(r.data.responseShape).toHaveProperty('monitoredAccounts', 'number');
+    });
+  });
 });
