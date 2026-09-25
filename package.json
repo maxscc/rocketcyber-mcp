@@ -13,7 +13,7 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/entry.js",
-    "clean": "rm -rf dist",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "prepare": "npm run build",
     "prebuild": "npm run clean",
     "test": "vitest run",
@@ -33,7 +33,7 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@wyre-technology/node-rocketcyber": "latest",
+    "@wyre-technology/node-rocketcyber": "file:vendor/wyre-technology-node-rocketcyber-1.1.3.tgz",
     "winston": "^3.11.0",
     "zod": "^4.4.3"
   },

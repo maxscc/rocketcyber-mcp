@@ -5,3 +5,12 @@ dist/
 
 # Cloudflare Wrangler
 .wrangler/
+
+# Suffolk deployment
+!.env.suffolk.example
+!vendor/*.tgz
+logs/
+SCC-*.exe
+SCC-*.xml
+SCC-*.exe.config
+WinSW-x64.exe

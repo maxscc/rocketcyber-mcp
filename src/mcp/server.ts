@@ -19,6 +19,7 @@ import { EnvironmentConfig, parseCredentialsFromHeaders, GatewayCredentials } fr
 import { RocketCyberResourceHandler } from '../handlers/resource.handler.js';
 import { RocketCyberToolHandler } from '../handlers/tool.handler.js';
 import { verifyS2sHeader, S2S_HEADER } from './s2s-verify.js';
+import { bearerMatches } from '../utils/bearer.js';
 
 export class RocketCyberMcpServer {
   private server: Server;
@@ -210,6 +211,15 @@ export class RocketCyberMcpServer {
 
       // MCP endpoint — stateless: fresh server + transport per request
       if (url.pathname === '/mcp') {
+        // Suffolk: when MCP_BEARER_TOKEN is set, every /mcp request must carry
+        // "Authorization: Bearer <token>" (same as the other SCC MCP servers).
+        const bearerToken = process.env.MCP_BEARER_TOKEN || '';
+        if (bearerToken && !bearerMatches(req.headers.authorization, bearerToken)) {
+          res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
+          res.end(JSON.stringify({ error: 'Missing or invalid bearer token.' }));
+          return;
+        }
+
         // Gateway S2S verification (gateway#377 parity). Runs before any
         // credential extraction — see src/mcp/s2s-verify.ts. Empty secret
         // means S2S enforcement isn't provisioned for this vendor yet, so
@@ -300,6 +310,10 @@ export class RocketCyberMcpServer {
         this.logger.info(`RocketCyber MCP Server listening on http://${host}:${port}/mcp`);
         this.logger.info(`Health check available at http://${host}:${port}/health`);
         this.logger.info(`Authentication mode: ${isGatewayMode ? 'gateway (header-based)' : 'env (environment variables)'}`);
+        this.logger.info(`Bearer auth on /mcp: ${process.env.MCP_BEARER_TOKEN ? 'on' : 'OFF'}`);
+        if (!process.env.MCP_BEARER_TOKEN && !isGatewayMode && !process.env.CONDUIT_S2S_SECRET) {
+          this.logger.warn('MCP_BEARER_TOKEN is not set: /mcp accepts unauthenticated requests.');
+        }
         resolve();
       });
     });
@@ -322,9 +336,9 @@ export class RocketCyberMcpServer {
   }
 
   private getServerInstructions(): string {
-    return `# RocketCyber MCP Server
+    return `# Kaseya MDR MCP Server (formerly RocketCyber)
 
-This server provides read-only access to RocketCyber Managed SOC data through the Model Context Protocol.
+This server provides read-only access to Kaseya MDR (formerly RocketCyber Managed SOC) data through the Model Context Protocol.
 
 ## Available Resources:
 - **rocketcyber://account** - Account information
