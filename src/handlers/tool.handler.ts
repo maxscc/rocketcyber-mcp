@@ -1,6 +1,7 @@
 import { RocketCyberService } from '../services/rocketcyber.service.js';
 import { Logger } from '../utils/logger.js';
 import { TOOL_DEFINITIONS, McpTool } from './tool.definitions.js';
+import { DEFAULT_SORTS, APPS_UNSUPPORTED_PARAMS, withDefaultSort, stripParams, shapeOffice } from './suffolk.js';
 
 export { McpTool };
 
@@ -111,8 +112,9 @@ export class RocketCyberToolHandler {
       }],
       ['rocketcyber_list_incidents', async (a) => {
         const { verbose, ...params } = a;
-        let r = await s.listIncidents(params);
-        const message = `Retrieved incidents (${r.data?.length || 0} results, page ${r.currentPage || 1} of ${r.totalPages || 1})`;
+        const sorted = await withDefaultSort(params, DEFAULT_SORTS.incidents, p => s.listIncidents(p));
+        let r = sorted.result;
+        const message = `Retrieved incidents (${r.data?.length || 0} results, page ${r.currentPage || 1} of ${r.totalPages || 1})${sorted.sortNote}`;
         if (!verbose && Array.isArray(r?.data)) {
           r = { ...r, data: r.data.map(compactIncident) };
           return applyResponseBudget(r, message);
@@ -133,8 +135,8 @@ export class RocketCyberToolHandler {
             'app IDs, or rocketcyber_get_event_summary (no appId needed) to see per-app event counts first.'
           );
         }
-        const r = await s.listEvents(a);
-        return { result: r, message: `Retrieved events (${r.data?.length || 0} results, page ${r.currentPage || 1} of ${r.totalPages || 1})` };
+        const { result: r, sortNote } = await withDefaultSort(a, DEFAULT_SORTS.events, p => s.listEvents(p));
+        return { result: r, message: `Retrieved events (${r.data?.length || 0} results, page ${r.currentPage || 1} of ${r.totalPages || 1})${sortNote}` };
       }],
       ['rocketcyber_get_event_summary', async (a) => {
         const r = await s.getEventSummary(a);
@@ -145,7 +147,7 @@ export class RocketCyberToolHandler {
         return { result: r, message: `Retrieved firewalls (${r.data?.length || 0} results, page ${r.currentPage || 1} of ${r.totalPages || 1})` };
       }],
       ['rocketcyber_list_apps', async (a) => {
-        const r = await s.listApps(a);
+        const r = await s.listApps(stripParams(a, APPS_UNSUPPORTED_PARAMS));
         return { result: r, message: `Retrieved apps (${r.data?.length || 0} results, page ${r.currentPage || 1} of ${r.totalPages || 1})` };
       }],
       ['rocketcyber_get_defender', async (a) => {
@@ -154,7 +156,8 @@ export class RocketCyberToolHandler {
       }],
       ['rocketcyber_get_office', async (a) => {
         const r = await s.getOffice(a.accountId ? { accountId: a.accountId } : undefined);
-        return { result: r, message: 'Office 365 status retrieved successfully' };
+        if (a.raw === true) return { result: r, message: 'Office 365 status (raw, uncapped)' };
+        return shapeOffice(r, a);
       }],
     ]);
   }

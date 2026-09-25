@@ -265,7 +265,7 @@ describe("rocketcyber_list_incidents verbose stripping", () => {
   it("strips verbose from the service call arguments", async () => {
     const { handler, listIncidents } = makeHandler(incidentsResponse());
     await callListIncidents(handler, { verbose: true, status: "open", page: 2 });
-    expect(listIncidents).toHaveBeenCalledWith({ status: "open", page: 2 });
+    expect(listIncidents).toHaveBeenCalledWith({ status: "open", page: 2, sort: "createdAt:desc" });
   });
 
   it("never leaks verbose into the RocketCyber HTTP query params", async () => {
@@ -332,7 +332,7 @@ describe("rocketcyber_list_events appId requirement", () => {
     const { handler, listEvents } = makeEventsHandler(eventsResponse());
     const result = await handler.callTool("rocketcyber_list_events", { appId: 34, page: 2 });
     expect(result.isError).toBeUndefined();
-    expect(listEvents).toHaveBeenCalledWith({ appId: 34, page: 2 });
+    expect(listEvents).toHaveBeenCalledWith({ appId: 34, page: 2, sort: "createdAt:desc" });
     const body = JSON.parse(result.content[0].text);
     expect(body.message).toBe("Retrieved events (1 results, page 1 of 1)");
   });
@@ -341,7 +341,7 @@ describe("rocketcyber_list_events appId requirement", () => {
     const { handler, listEvents } = makeEventsHandler(eventsResponse());
     const result = await handler.callTool("rocketcyber_list_events", { appId: 0 });
     expect(result.isError).toBeUndefined();
-    expect(listEvents).toHaveBeenCalledWith({ appId: 0 });
+    expect(listEvents).toHaveBeenCalledWith({ appId: 0, sort: "createdAt:desc" });
   });
 });
 

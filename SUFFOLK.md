@@ -14,7 +14,8 @@ Suffolk's fork (GitHub repo `maxscc/rocketcyber-mcp`) of [WYRE-AI/rocketcyber-mc
 | `@wyre-technology/node-rocketcyber` is vendored (`vendor/wyre-technology-node-rocketcyber-1.1.3.tgz`), `.npmrc` removed | Upstream only publishes it to GitHub Packages, which needs a token even for public packages. The tarball is built from the public [WYRE-AI/node-rocketcyber](https://github.com/WYRE-AI/node-rocketcyber) source (v1.1.3, no runtime dependencies), so `npm ci` only uses public npm. |
 | `clean` script uses Node instead of `rm -rf` | `npm run build` runs `prebuild` → `clean`, and `rm` doesn't exist in cmd.exe on Windows. |
 | `install-service.ps1`, `.env.suffolk.example` | Same installer flow as the other servers (WinSW service, locked-down `.env`, connection check). |
-| `src/__tests__/suffolk.test.ts` | Covers the bearer check over real HTTP, and fails if upstream adds a tool that isn't a `test`/`get`/`list` read. All 36 upstream tests still pass (42 total). |
+| Tool fixes (`src/handlers/suffolk.ts`) | `list_incidents` / `list_events` default to newest first (`createdAt:desc`; events fall back to `detectedAt:desc`, then to the API's own order if the API rejects sorting). `list_apps` no longer sends `page`/`pageSize`, which `/apps` rejects with 400. `get_office` returns a per-customer summary (mailbox + MFA counts) by default. `summary: false` lists mailboxes, filtered by `accountId` / `mfa` / `search`, paged with `limit`/`offset` and capped at ~40K characters. `raw: true` returns the untouched response. |
+| `src/__tests__/suffolk.test.ts` | Covers the bearer check over real HTTP, and fails if upstream adds a tool that isn't a `test`/`get`/`list` read. `src/__tests__/suffolk-tools.test.ts` covers the tool fixes. All 36 upstream tests still pass (53 total). |
 
 No read-only gate is needed: all 10 upstream tools are reads, and the RocketCyber v3 API this uses has no write endpoints.
 
@@ -71,10 +72,10 @@ Claude picks up the new tools through the existing connector. Reconnect it if th
 |---|---|
 | Account | `rocketcyber_get_account`, `rocketcyber_test_connection` |
 | Agents | `rocketcyber_list_agents` |
-| Incidents | `rocketcyber_list_incidents` (long text truncated unless `verbose: true`) |
-| Events | `rocketcyber_get_event_summary`, `rocketcyber_list_events` (needs `appId` — get it from the summary or `list_apps`) |
+| Incidents | `rocketcyber_list_incidents` (newest first; long text truncated unless `verbose: true`) |
+| Events | `rocketcyber_get_event_summary`, `rocketcyber_list_events` (newest first; needs `appId` — get it from the summary or `list_apps`) |
 | Firewalls / Apps | `rocketcyber_list_firewalls`, `rocketcyber_list_apps` |
-| Defender / Office 365 | `rocketcyber_get_defender`, `rocketcyber_get_office` |
+| Defender / Office 365 | `rocketcyber_get_defender`, `rocketcyber_get_office` (summary by default; `summary: false` + `accountId`/`mfa`/`search` to list mailboxes) |
 
 Also exposes 3 MCP resources: `rocketcyber://account`, `rocketcyber://incidents`, `rocketcyber://agents`.
 
