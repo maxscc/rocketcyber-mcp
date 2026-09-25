@@ -112,7 +112,8 @@ describe('Suffolk: get_office', () => {
   it('reads MFA from assorted field shapes', () => {
     expect(mfaState({ mfaEnabled: true })).toBe(true);
     expect(mfaState({ MFAStatus: 'Disabled' })).toBe(false);
-    expect(mfaState({ strongAuthenticationMethods: [], mfaMethods: ['app'] })).toBe(true);
+    expect(mfaState({ mfaMethods: ['app'] })).toBe(true);
+    expect(mfaState({ strongAuthenticationMethods: [] })).toBe(false);
     expect(mfaState({ upn: 'x' })).toBeUndefined();
   });
 
@@ -168,6 +169,40 @@ describe('Suffolk: get_office', () => {
       const r = body(await handlerWith({ getOffice }).callTool('rocketcyber_get_office', {}));
       expect(r.data.totalRecords).toBe(0);
       expect(r.data.responseShape).toHaveProperty('monitoredAccounts', 'number');
+    });
+  });
+
+  describe('MFA field mapping', () => {
+    it.each([
+      [{ mfaStatus: 'Enabled ' }, true],
+      [{ mfaStatus: 'Enforced' }, true],
+      [{ mfaStatus: 'Disabled' }, false],
+      [{ mfaStatus: 'MFA Enabled' }, true],
+      [{ mfaStatus: 'Not Enabled' }, false],
+      [{ mfaStatus: 'notCapable' }, false],
+      [{ mfaStatus: 'None' }, false],
+      [{ mfaStatus: '0' }, false],
+      [{ mfaStatus: 'Unknown' }, undefined],
+      [{ mfaStatus: null, isMfaRegistered: true }, true],
+      [{ mfaStatus: { enabled: false } }, false],
+      [{ mfaStatus: { state: 'Enforced' } }, true],
+      [{ security: { mfaEnabled: true } }, true],
+      [{ strongAuthenticationMethods: [{ methodType: 'PhoneAppNotification' }] }, true],
+    ])('%j -> %s', (rec, expected) => {
+      expect(mfaState(rec as Record<string, unknown>)).toBe(expected);
+    });
+
+    it('summary reports the raw MFA values it saw and a sample record', async () => {
+      const recs = [
+        { accountId: 1, upn: 'a', mfaStatus: 'Enabled' },
+        { accountId: 1, upn: 'b', mfaStatus: 'Disabled' },
+        { accountId: 1, upn: 'c', mfaStatus: 'Disabled' },
+      ];
+      const getOffice = vi.fn().mockResolvedValue({ monitoredAccounts: recs });
+      const d = body(await handlerWith({ getOffice }).callTool('rocketcyber_get_office', {})).data;
+      expect(d.mfa).toEqual({ enabled: 1, disabled: 2, unknown: 0 });
+      expect(d.mfaFieldValues).toEqual({ mfaStatus: { '"Disabled"': 2, '"Enabled"': 1 } });
+      expect(d.sampleRecord).toEqual(recs[0]);
     });
   });
 });

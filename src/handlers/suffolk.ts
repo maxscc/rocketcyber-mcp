@@ -206,20 +206,74 @@ function firstKey(r: Rec, keys: string[]): any {
   return undefined;
 }
 
-/** Boolean-ish MFA state from any field whose name mentions mfa / multifactor / 2fa. */
-export function mfaState(r: Rec): boolean | undefined {
-  for (const [k, v] of Object.entries(r)) {
-    if (!/mfa|multi.?factor|2fa|twofactor/i.test(k)) continue;
-    if (typeof v === 'boolean') return v;
-    if (typeof v === 'number') return v > 0;
-    if (typeof v === 'string') {
-      const s = v.toLowerCase();
-      if (/^(true|yes|enabled|enforced|registered|on|1)$/.test(s)) return true;
-      if (/^(false|no|disabled|none|notregistered|not registered|off|0|)$/.test(s)) return false;
+const MFA_KEY = /mfa|multi.?factor|2fa|two.?factor|strong.?auth|auth.?method/i;
+const NEG = /(^|[^a-z])(not|no|none|disabled?|off|false|unregistered|inactive|missing|absent|n\/a)([^a-z]|$)|^not|notregistered|notenabled|notenforced|^0+$/;
+const POS = /enabled|enforced|registered|true|yes|^on$|active|capable|required|compliant|configured|^\d*[1-9]\d*$/;
+
+function parseMfaValue(v: unknown, depth = 0): boolean | undefined {
+  if (v === null || v === undefined) return undefined;
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return v > 0;
+  if (typeof v === 'string') {
+    const t = v.trim().toLowerCase();
+    if (!t) return undefined;
+    if (NEG.test(t)) return false;
+    if (POS.test(t)) return true;
+    return undefined;
+  }
+  if (Array.isArray(v)) return v.length > 0;
+  if (isPlainObject(v) && depth < 2) {
+    // e.g. { enabled: true }, { status: "Enforced" }, { isMfaRegistered: false }
+    for (const [k, x] of Object.entries(v)) {
+      if (/enabled|registered|enforced|capable|status|state|value/i.test(k)) {
+        const r = parseMfaValue(x, depth + 1);
+        if (r !== undefined) return r;
+      }
     }
-    if (Array.isArray(v)) return v.length > 0;
   }
   return undefined;
+}
+
+/** Fields on a record that look like MFA fields (top level, or one level down). */
+export function mfaFields(r: Rec): [string, unknown][] {
+  const out: [string, unknown][] = [];
+  for (const [k, v] of Object.entries(r)) {
+    if (MFA_KEY.test(k)) out.push([k, v]);
+    else if (isPlainObject(v)) for (const [k2, v2] of Object.entries(v)) if (MFA_KEY.test(k2)) out.push([`${k}.${k2}`, v2]);
+  }
+  return out;
+}
+
+/** MFA state from the first MFA-looking field that parses; undefined if none do. */
+export function mfaState(r: Rec): boolean | undefined {
+  for (const [, v] of mfaFields(r)) {
+    const m = parseMfaValue(v);
+    if (m !== undefined) return m;
+  }
+  return undefined;
+}
+
+const clip = (v: unknown): unknown => {
+  if (typeof v === 'string') return v.length > 120 ? v.slice(0, 120) + '…' : v;
+  if (Array.isArray(v)) return v.length > 5 ? [...v.slice(0, 5).map(clip), `…${v.length - 5} more`] : v.map(clip);
+  if (isPlainObject(v)) return Object.fromEntries(Object.entries(v).slice(0, 30).map(([k, x]) => [k, clip(x)]));
+  return v;
+};
+
+/** Distinct values seen per MFA-looking field (top 10 each), for checking the mapping. */
+function mfaValueCounts(recs: Rec[]): Rec {
+  const byField = new Map<string, Map<string, number>>();
+  for (const r of recs) for (const [k, v] of mfaFields(r)) {
+    const key = JSON.stringify(v === undefined ? null : v).slice(0, 80);
+    const m = byField.get(k) ?? new Map<string, number>();
+    m.set(key, (m.get(key) ?? 0) + 1);
+    byField.set(k, m);
+  }
+  const out: Rec = {};
+  for (const [k, m] of byField) {
+    out[k] = Object.fromEntries([...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10));
+  }
+  return out;
 }
 
 export interface OfficeArgs {
@@ -282,6 +336,9 @@ export function shapeOffice(raw: unknown, a: OfficeArgs): { result: Rec; message
       byAccount: accounts,
       recordFields: fieldNames,
       recordsPath: path,
+      // What the MFA counts were derived from, so the mapping can be checked without summary:false
+      mfaFieldValues: mfaValueCounts(recs),
+      sampleRecord: recs[0] ? clip(recs[0]) : undefined,
       ...(all.length <= 1 ? { responseShape: describeShape(raw) } : {}),
     };
     return {
